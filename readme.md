@@ -48,8 +48,8 @@
 ## Установка
 
 ```bash
-git clone https://github.com/btwdan/Sadam_dip_proj.git
-cd Sadam_dip_proj
+git clone https://github.com/Saddamjon/knapsack-algorithms.git
+cd knapsack-algorithms
 
 python -m venv .venv
 

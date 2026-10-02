@@ -1,10 +1,8 @@
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Sequence, Tuple, Optional
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
-
-from .data_generator import Item, generate_items, items_to_lists
+from .data_generator import generate_items, items_to_lists
 
 
 AlgorithmFunc = Callable[[List[int], List[int], int], Tuple[int, List[int]]]
@@ -16,6 +14,13 @@ class AlgorithmResult:
     max_value: int
     selected_items: List[int]
     elapsed: float
+    # Заполняется, если алгоритм отказался работать на этих данных
+    # (например, полный перебор на большом числе предметов).
+    skipped_reason: Optional[str] = None
+
+    @property
+    def skipped(self) -> bool:
+        return self.skipped_reason is not None
 
 
 def measure_algorithm(
@@ -28,6 +33,8 @@ def measure_algorithm(
 ) -> AlgorithmResult:
     """
     Измеряет время выполнения одного алгоритма и возвращает результат.
+
+    ValueError алгоритма (слишком большой вход) пробрасывается наружу.
     """
     best_value = 0
     best_items: List[int] = []
@@ -58,10 +65,24 @@ def compare_algorithms(
 ) -> List[AlgorithmResult]:
     """
     Запускает набор алгоритмов на одинаковых данных и возвращает список результатов.
+
+    Алгоритм, отказавшийся работать на таком входе, попадает в список с
+    заполненным skipped_reason.
     """
     results: List[AlgorithmResult] = []
     for name, func in algorithms.items():
-        res = measure_algorithm(name, func, weights, values, capacity, repeats=repeats)
+        try:
+            res = measure_algorithm(
+                name, func, weights, values, capacity, repeats=repeats
+            )
+        except ValueError as exc:
+            res = AlgorithmResult(
+                name=name,
+                max_value=0,
+                selected_items=[],
+                elapsed=0.0,
+                skipped_reason=str(exc),
+            )
         results.append(res)
     return results
 
@@ -77,17 +98,21 @@ def benchmark_vs_items(
 
     Возвращает словарь:
         имя_алгоритма -> (список n_items, список средних времен)
+
+    Точки, на которых алгоритм отказался работать (ValueError), пропускаются.
     """
-    rng_seed = random_seed
     result: Dict[str, Tuple[List[int], List[float]]] = {
         name: ([], []) for name in algorithms
     }
 
     for n_items in items_range:
-        items = generate_items(n_items, random_seed=rng_seed)
+        items = generate_items(n_items, random_seed=random_seed)
         weights, values = items_to_lists(items)
         for name, func in algorithms.items():
-            res = measure_algorithm(name, func, weights, values, base_capacity)
+            try:
+                res = measure_algorithm(name, func, weights, values, base_capacity)
+            except ValueError:
+                continue
             xs, ys = result[name]
             xs.append(n_items)
             ys.append(res.elapsed)
@@ -103,6 +128,8 @@ def benchmark_vs_capacity(
 ) -> Dict[str, Tuple[List[int], List[float]]]:
     """
     Строит зависимость времени работы алгоритмов от вместимости рюкзака.
+
+    Точки, на которых алгоритм отказался работать (ValueError), пропускаются.
     """
     items = generate_items(n_items, random_seed=random_seed)
     weights, values = items_to_lists(items)
@@ -113,12 +140,38 @@ def benchmark_vs_capacity(
 
     for cap in capacity_range:
         for name, func in algorithms.items():
-            res = measure_algorithm(name, func, weights, values, cap)
+            try:
+                res = measure_algorithm(name, func, weights, values, cap)
+            except ValueError:
+                continue
             xs, ys = result[name]
             xs.append(cap)
             ys.append(res.elapsed)
 
     return result
+
+
+def _spread(center: int, minimum: int) -> List[int]:
+    """
+    Диапазон от center/2 до 2*center примерно из семи точек (не меньше трёх).
+    """
+    start = max(minimum, center // 2)
+    stop = max(start + 2, center * 2)
+    step = max(1, (stop - start) // 6)
+    values = list(range(start, stop + 1, step))
+    if values[-1] != stop:
+        values.append(stop)
+    return values
+
+
+def default_items_range(n_items: int) -> List[int]:
+    """Диапазон чисел предметов для графика по умолчанию (всегда непустой)."""
+    return _spread(n_items, minimum=2)
+
+
+def default_capacity_range(capacity: int) -> List[int]:
+    """Диапазон вместимостей для графика по умолчанию (всегда непустой)."""
+    return _spread(capacity, minimum=1)
 
 
 __all__ = [
@@ -128,5 +181,6 @@ __all__ = [
     "compare_algorithms",
     "benchmark_vs_items",
     "benchmark_vs_capacity",
+    "default_items_range",
+    "default_capacity_range",
 ]
-

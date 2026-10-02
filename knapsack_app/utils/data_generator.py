@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-import random
 import csv
+import io
+import random
 
 
 @dataclass
@@ -20,14 +21,16 @@ def generate_items(
 ) -> List[Item]:
     """
     Генерирует случайные предметы с целыми весами и ценностями.
+
+    Используется собственный генератор, поэтому глобальное состояние random
+    (и, например, генетический алгоритм) не затрагивается.
     """
-    if random_seed is not None:
-        random.seed(random_seed)
+    rng = random.Random(random_seed)
 
     return [
         Item(
-            weight=random.randint(min_weight, max_weight),
-            value=random.randint(min_value, max_value),
+            weight=rng.randint(min_weight, max_weight),
+            value=rng.randint(min_value, max_value),
         )
         for _ in range(max(0, n_items))
     ]
@@ -42,6 +45,35 @@ def items_to_lists(items: List[Item]) -> Tuple[List[int], List[int]]:
     return weights, values
 
 
+_DELIMITERS = (",", ";", "\t")
+_ENCODINGS = ("utf-8-sig", "cp1251")
+
+
+def _decode(raw: bytes) -> str:
+    """
+    Декодирует содержимое файла: UTF-8 (с BOM или без), затем Windows-1251.
+    """
+    for encoding in _ENCODINGS:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _detect_delimiter(text: str) -> str:
+    """
+    Определяет разделитель по первой непустой строке: запятая, точка с запятой
+    (так сохраняет Excel с русской локалью) или табуляция.
+    """
+    for line in text.splitlines():
+        if line.strip():
+            counts = {d: line.count(d) for d in _DELIMITERS}
+            best = max(_DELIMITERS, key=lambda d: counts[d])
+            return best if counts[best] > 0 else ","
+    return ","
+
+
 def load_items_from_csv(path: str) -> List[Item]:
     """
     Загружает предметы из CSV-файла.
@@ -49,6 +81,8 @@ def load_items_from_csv(path: str) -> List[Item]:
     Формат файла:
     - каждая строка описывает один предмет;
     - два столбца: вес, ценность (в таком порядке);
+    - разделитель: запятая, точка с запятой или табуляция;
+    - кодировка: UTF-8 (в том числе с BOM) или Windows-1251;
     - первая строка может быть заголовком (если в ней нечисловые значения).
 
     Пример:
@@ -59,44 +93,37 @@ def load_items_from_csv(path: str) -> List[Item]:
     """
     items: List[Item] = []
 
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row_idx, row in enumerate(reader):
-            if not row:
-                continue
+    with open(path, "rb") as f:
+        text = _decode(f.read())
 
-            # Обрезаем пробелы.
-            cells = [cell.strip() for cell in row]
-            if len(cells) < 2:
-                # Недостаточно данных в строке — пропускаем.
-                continue
+    reader = csv.reader(io.StringIO(text), delimiter=_detect_delimiter(text))
+    for row in reader:
+        # Обрезаем пробелы.
+        cells = [cell.strip() for cell in row]
+        if not any(cells):
+            continue
 
-            w_str, v_str = cells[0], cells[1]
+        if len(cells) < 2:
+            # Недостаточно данных в строке — пропускаем.
+            continue
 
-            # Пропускаем строку‑заголовок, если значения не являются числами.
-            if row_idx == 0:
-                try:
-                    int(w_str)
-                    int(v_str)
-                except ValueError:
-                    # Похоже на заголовок, переходим к следующей строке.
-                    continue
+        w_str, v_str = cells[0], cells[1]
 
-            try:
-                weight = int(w_str)
-                value = int(v_str)
-            except ValueError:
-                # Невалидная строка — пропускаем.
-                continue
+        try:
+            weight = int(w_str)
+            value = int(v_str)
+        except ValueError:
+            # Нечисловые значения: заголовок (первая строка) или некорректная
+            # строка — в любом случае пропускаем.
+            continue
 
-            if weight <= 0 or value < 0:
-                # Логически неверные данные — пропускаем.
-                continue
+        if weight <= 0 or value < 0:
+            # Логически неверные данные — пропускаем.
+            continue
 
-            items.append(Item(weight=weight, value=value))
+        items.append(Item(weight=weight, value=value))
 
     return items
 
 
 __all__ = ["Item", "generate_items", "items_to_lists", "load_items_from_csv"]
-

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import queue
+import threading
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Callable
+from typing import Any, Callable, Dict, List, Tuple
 
 import customtkinter as ctk
 import tkinter as tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 from tkinter import ttk, messagebox, filedialog
 
+from algorithms.brute_force import MAX_ITEMS as BRUTE_FORCE_MAX_ITEMS
 from algorithms.brute_force import solve_knapsack_bruteforce
 from algorithms.dynamic_programming import solve_knapsack_dp
 from algorithms.branch_and_bound import solve_knapsack_branch_and_bound
@@ -19,12 +24,19 @@ from utils.performance import (
     benchmark_vs_capacity,
     benchmark_vs_items,
     compare_algorithms,
+    default_capacity_range,
+    default_items_range,
+    measure_algorithm,
 )
 from utils.plots import (
     plot_algorithm_comparison,
     plot_time_vs_capacity,
     plot_time_vs_items,
 )
+
+# Дольше всего Treeview с тысячами строк вставляется в таблицу, поэтому
+# ограничиваем размер случайно сгенерированного набора.
+MAX_GENERATED_ITEMS = 5000
 
 
 ALGORITHMS: Dict[str, AlgorithmFunc] = {
@@ -53,9 +65,42 @@ class MainWindow(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.current_data = CurrentData()
+        self._busy = False
 
+        self._style_treeview()
         self._build_layout()
         self._build_menu()
+
+    def _style_treeview(self) -> None:
+        """
+        ttk.Treeview не подхватывает тему customtkinter, поэтому красим вручную.
+        """
+        dark = ctk.get_appearance_mode() == "Dark"
+        background = "#2b2b2b" if dark else "#ffffff"
+        foreground = "#dce4ee" if dark else "#1a1a1a"
+        heading = "#3a3a3a" if dark else "#e5e5e5"
+
+        style = ttk.Style(self)
+        style.theme_use("default")
+        style.configure(
+            "Treeview",
+            background=background,
+            fieldbackground=background,
+            foreground=foreground,
+            borderwidth=0,
+            rowheight=24,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=heading,
+            foreground=foreground,
+            relief="flat",
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", "#1f6aa5")],
+            foreground=[("selected", "#ffffff")],
+        )
 
     # Разметка основного окна.
 
@@ -130,6 +175,20 @@ class MainWindow(ctk.CTk):
             command=self.on_plot_performance,
         )
         self.plot_button.grid(row=11, column=0, sticky="ew", padx=10, pady=(0, 10))
+
+        self.status_label = ctk.CTkLabel(
+            left_frame, text="", anchor="w", wraplength=260, justify="left"
+        )
+        self.status_label.grid(row=12, column=0, sticky="ew", padx=10, pady=(0, 10))
+
+        # Кнопки, которые блокируются на время фоновых вычислений.
+        self._action_buttons = [
+            self.generate_button,
+            self.load_csv_button,
+            self.solve_button,
+            self.compare_button,
+            self.plot_button,
+        ]
 
         right_frame = ctk.CTkFrame(self)
         right_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=10)
@@ -268,17 +327,89 @@ class MainWindow(ctk.CTk):
             messagebox.showerror("Ошибка", "Введите корректную вместимость (> 0).")
             return None
 
-    def _read_n_items(self) -> int | None:
+    def _read_n_items(self, maximum: int | None = None) -> int | None:
         try:
             n = int(self.n_items_entry.get())
             if n <= 0:
                 raise ValueError
-            return n
         except ValueError:
             messagebox.showerror(
                 "Ошибка", "Введите корректное количество предметов (> 0)."
             )
             return None
+        if maximum is not None and n > maximum:
+            messagebox.showerror(
+                "Ошибка", f"Слишком много предметов: максимум {maximum}."
+            )
+            return None
+        return n
+
+    def _run_async(
+        self,
+        work: Callable[[], Any],
+        on_done: Callable[[Any], None],
+        status: str = "Вычисление...",
+    ) -> None:
+        """
+        Выполняет work в фоновом потоке, чтобы окно не зависало, и вызывает
+        on_done(результат) в потоке интерфейса. Ошибки показываются в диалоге.
+        """
+        self._set_busy(True, status)
+        results: queue.Queue = queue.Queue()
+
+        def target() -> None:
+            try:
+                results.put(("ok", work()))
+            except Exception as exc:  # noqa: BLE001 — показываем любую ошибку пользователю
+                results.put(("error", exc))
+
+        threading.Thread(target=target, daemon=True).start()
+
+        def poll() -> None:
+            try:
+                kind, payload = results.get_nowait()
+            except queue.Empty:
+                self.after(50, poll)
+                return
+            self._set_busy(False)
+            if kind == "ok":
+                on_done(payload)
+            else:
+                messagebox.showerror("Ошибка", str(payload) or type(payload).__name__)
+
+        self.after(50, poll)
+
+    def _set_busy(self, busy: bool, status: str = "") -> None:
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        for button in self._action_buttons:
+            button.configure(state=state)
+        self.status_label.configure(text=status if busy else "")
+
+    def _show_figures_window(
+        self, title: str, figures: List[Tuple[str, Figure]], note: str = ""
+    ) -> None:
+        """
+        Показывает графики matplotlib во вкладках отдельного окна. Встраивание
+        вместо plt.show() не блокирует главное окно и не накапливает фигуры.
+        """
+        top = ctk.CTkToplevel(self)
+        top.title(title)
+        top.geometry("860x600")
+
+        if note:
+            ctk.CTkLabel(top, text=note, anchor="w").pack(
+                side="bottom", fill="x", padx=10, pady=(0, 8)
+            )
+
+        tabs = ctk.CTkTabview(top)
+        tabs.pack(fill="both", expand=True, padx=10, pady=10)
+        for tab_title, figure in figures:
+            tab = tabs.add(tab_title)
+            canvas = FigureCanvasTkAgg(figure, master=tab)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+        top.after(100, top.lift)
 
     def _update_items_table(self, items: List[Item]) -> None:
         for row in self.items_tree.get_children():
@@ -331,7 +462,7 @@ class MainWindow(ctk.CTk):
         capacity = self._read_capacity()
         if capacity is None:
             return
-        n_items = self._read_n_items()
+        n_items = self._read_n_items(maximum=MAX_GENERATED_ITEMS)
         if n_items is None:
             return
 
@@ -432,10 +563,10 @@ class MainWindow(ctk.CTk):
 
         try:
             items = load_items_from_csv(path)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             messagebox.showerror(
                 "Ошибка чтения файла",
-                f"Не удалось открыть файл:\n{exc}",
+                f"Не удалось прочитать файл:\n{exc}",
             )
             return
 
@@ -463,7 +594,8 @@ class MainWindow(ctk.CTk):
         """
         messagebox.showinfo(
             "Формат CSV файла",
-            "Файл должен быть в формате CSV (разделитель — запятая).\n\n"
+            "Файл должен быть в формате CSV (разделитель — запятая, точка с запятой "
+            "или табуляция; кодировка UTF-8 или Windows-1251).\n\n"
             "Каждая строка описывает один предмет и содержит ДВА столбца:\n"
             "  1) вес (целое число > 0)\n"
             "  2) ценность (целое число ≥ 0)\n\n"
@@ -494,11 +626,21 @@ class MainWindow(ctk.CTk):
             messagebox.showerror("Ошибка", "Выберите корректный алгоритм.")
             return
 
-        weights, values = items_to_lists(self.current_data.items)
-        from utils.performance import measure_algorithm
+        if algo_name == "Brute Force" and len(self.current_data.items) > BRUTE_FORCE_MAX_ITEMS:
+            messagebox.showwarning(
+                "Слишком много предметов",
+                f"Полный перебор работает не более чем с {BRUTE_FORCE_MAX_ITEMS} "
+                f"предметами (сейчас {len(self.current_data.items)}): время растёт "
+                "как 2^n. Выберите другой алгоритм или уменьшите набор.",
+            )
+            return
 
-        result = measure_algorithm(algo_name, func, weights, values, capacity)
-        self._show_result(result)
+        weights, values = items_to_lists(self.current_data.items)
+        self._run_async(
+            lambda: measure_algorithm(algo_name, func, weights, values, capacity),
+            self._show_result,
+            status=f"Решается: {algo_name}...",
+        )
 
     def on_compare(self) -> None:
         if self.current_data.items is None:
@@ -514,64 +656,84 @@ class MainWindow(ctk.CTk):
         self.current_data.capacity = capacity
 
         weights, values = items_to_lists(self.current_data.items)
-        results = compare_algorithms(ALGORITHMS, weights, values, capacity)
+        self._run_async(
+            lambda: compare_algorithms(ALGORITHMS, weights, values, capacity),
+            self._show_comparison,
+            status="Сравнение алгоритмов...",
+        )
 
-        # Таблица результатов в отдельном окне.
+    def _show_comparison(self, results: List[AlgorithmResult]) -> None:
+        """
+        Таблица результатов и диаграмма времени в отдельном окне.
+        """
         top = ctk.CTkToplevel(self)
         top.title("Сравнение алгоритмов")
-        top.geometry("600x300")
+        top.geometry("760x640")
 
         tree = ttk.Treeview(
             top,
             columns=("name", "value", "time"),
             show="headings",
+            height=len(results),
         )
         tree.heading("name", text="Алгоритм")
         tree.heading("value", text="Макс. ценность")
         tree.heading("time", text="Время (сек)")
-        tree.column("name", width=200, anchor="w")
-        tree.column("value", width=120, anchor="center")
-        tree.column("time", width=120, anchor="center")
-        tree.pack(fill="both", expand=True, padx=10, pady=10)
+        tree.column("name", width=220, anchor="w")
+        tree.column("value", width=140, anchor="center")
+        tree.column("time", width=320, anchor="center")
+        tree.pack(fill="x", padx=10, pady=(10, 5))
 
         for r in results:
-            tree.insert(
-                "",
-                "end",
-                values=(r.name, r.max_value, f"{r.elapsed:.6f}"),
-            )
+            if r.skipped:
+                row = (r.name, "—", f"пропущен: {r.skipped_reason}")
+            else:
+                row = (r.name, r.max_value, f"{r.elapsed:.6f}")
+            tree.insert("", "end", values=row)
 
-        # График сравнения времени.
-        plot_algorithm_comparison(results)
+        canvas = FigureCanvasTkAgg(plot_algorithm_comparison(results), master=top)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=(5, 10))
+        top.after(100, top.lift)
 
     def on_plot_performance(self) -> None:
-        if self.current_data.items is None:
-            messagebox.showwarning(
-                "Нет данных",
-                "Сначала сгенерируйте данные (кнопка «Сгенерировать данные»).",
-            )
-            return
-
         capacity = self._read_capacity()
-        n_items = self._read_n_items()
+        n_items = self._read_n_items(maximum=MAX_GENERATED_ITEMS)
         if capacity is None or n_items is None:
             return
 
         # Диапазоны по умолчанию ориентированы на учебные эксперименты.
-        items_range = list(range(max(5, n_items // 2), n_items * 2 + 1, max(1, n_items // 4)))
-        capacity_range = list(
-            range(max(10, capacity // 2), capacity * 2 + 1, max(1, capacity // 4))
-        )
+        items_range = default_items_range(n_items)
+        capacity_range = default_capacity_range(capacity)
 
-        data_items = benchmark_vs_items(ALGORITHMS, base_capacity=capacity, items_range=items_range)
-        plot_time_vs_items(data_items)
+        def work() -> Tuple[Any, Any]:
+            data_items = benchmark_vs_items(
+                ALGORITHMS, base_capacity=capacity, items_range=items_range
+            )
+            data_capacity = benchmark_vs_capacity(
+                ALGORITHMS, n_items=n_items, capacity_range=capacity_range
+            )
+            return data_items, data_capacity
 
-        data_capacity = benchmark_vs_capacity(
-            ALGORITHMS,
-            n_items=n_items,
-            capacity_range=capacity_range,
-        )
-        plot_time_vs_capacity(data_capacity)
+        note = ""
+        if max(items_range) > BRUTE_FORCE_MAX_ITEMS:
+            note = (
+                f"Brute Force показан только для n ≤ {BRUTE_FORCE_MAX_ITEMS} "
+                "(дальше время растёт как 2^n)."
+            )
+
+        def on_done(data: Tuple[Any, Any]) -> None:
+            data_items, data_capacity = data
+            self._show_figures_window(
+                "Время работы алгоритмов",
+                [
+                    ("От числа предметов", plot_time_vs_items(data_items)),
+                    ("От вместимости", plot_time_vs_capacity(data_capacity)),
+                ],
+                note=note,
+            )
+
+        self._run_async(work, on_done, status="Строятся графики...")
 
 
 def run_app() -> None:

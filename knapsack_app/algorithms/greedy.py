@@ -1,5 +1,7 @@
 from typing import List, Tuple
 
+from ._common import value_density
+
 
 def solve_knapsack_greedy(
     weights: List[int], values: List[int], capacity: int
@@ -13,8 +15,9 @@ def solve_knapsack_greedy(
     if n == 0 or capacity <= 0:
         return 0, []
 
-    items = list(range(n))
-    items.sort(key=lambda i: values[i] / weights[i], reverse=True)
+    items = sorted(
+        range(n), key=lambda i: value_density(values[i], weights[i]), reverse=True
+    )
 
     total_weight = 0
     total_value = 0
@@ -31,4 +34,3 @@ def solve_knapsack_greedy(
 
 
 __all__ = ["solve_knapsack_greedy"]
-

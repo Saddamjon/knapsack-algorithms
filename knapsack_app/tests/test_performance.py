@@ -4,6 +4,7 @@ from algorithms.brute_force import solve_knapsack_bruteforce
 from algorithms.greedy import solve_knapsack_greedy
 from utils.data_generator import generate_items, items_to_lists
 from utils.performance import (
+    AlgorithmResult,
     benchmark_vs_capacity,
     benchmark_vs_items,
     compare_algorithms,
@@ -65,6 +66,25 @@ def test_default_ranges_are_never_empty():
         assert len(capacity_range) >= 3
         assert capacity_range == sorted(set(capacity_range))
         assert min(capacity_range) >= 1
+
+
+def test_time_axes_are_logarithmic_and_tolerate_zero_times():
+    zero_result = AlgorithmResult(
+        name="Greedy", max_value=1, selected_items=[0], elapsed=0.0
+    )
+    slow_result = AlgorithmResult(
+        name="Brute Force", max_value=1, selected_items=[0], elapsed=0.5
+    )
+    figures = [
+        plot_algorithm_comparison([zero_result, slow_result]),
+        plot_time_vs_items({"Greedy": ([1, 2], [0.0, 0.0])}),
+        plot_time_vs_capacity({"Greedy": ([10, 20], [0.0, 1e-5])}),
+    ]
+
+    for fig in figures:
+        ax = fig.axes[0]
+        assert ax.get_yscale() == "log"
+        assert "логарифм" in ax.get_ylabel()
 
 
 def test_plots_build_figures_without_pyplot():
